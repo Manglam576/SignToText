@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SignToText — Real-Time ASL Sign Language Translator</title>
+  <meta name="description" content="SignToText uses a live webcam and a trained CNN model to translate American Sign Language (ASL) hand signs into text in real time." />
+  <meta name="theme-color" content="#06060f" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- MediaPipe Hands (runs fully in-browser via WASM) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <!-- ── Navbar ─────────────────────────────────────── -->
+  <nav id="navbar" role="navigation" aria-label="Main navigation">
+    <div class="nav-inner">
+      <span class="nav-logo">✋ SignToText</span>
+      <span id="nav-user" aria-live="polite"></span>
+      <button id="btn-open-auth" class="btn btn-ghost btn-sm" aria-haspopup="dialog" aria-controls="auth-modal">Sign In</button>
+      <button id="btn-logout"    class="btn btn-ghost btn-sm" style="display:none" aria-label="Sign out">Sign Out</button>
+    </div>
+  </nav>
+
+  <!-- ── Hero / Live Camera ─────────────────────────── -->
+  <section id="hero" aria-label="Live ASL Translator">
+    <div class="container">
+
+      <div class="hero-eyebrow">
+        <span></span> Real-Time ASL Recognition
+      </div>
+      <h1 class="hero-title">Sign Language,<br>Into Text</h1>
+      <p class="hero-subtitle">
+        Point your webcam, show an ASL hand sign, and watch the letter appear instantly — powered by a CNN trained on 87,000 images.
+      </p>
+
+      <!-- Camera Panel -->
+      <div class="camera-wrap" id="camera-wrap">
+        <div id="cam-idle" aria-hidden="true">
+          <div class="cam-idle-icon">🎥</div>
+          <p>Click <strong>Start Camera</strong> to begin live translation</p>
+          <p style="font-size:0.78rem; opacity:0.6;">Requires python3 core/server.py to be running</p>
+        </div>
+
+        <video id="webcam" autoplay playsinline aria-label="Live webcam feed"></video>
+        <canvas id="snapshot" aria-hidden="true"></canvas>
+
+        <!-- Hand tracking overlay canvas (landmarks + bbox drawn here) -->
+        <canvas id="hand-overlay" aria-hidden="true"></canvas>
+
+        <!-- Hand Detected badge -->
+        <div id="hand-badge" aria-live="polite">
+          <span class="hand-badge-dot"></span>
+          <span id="hand-badge-text">Scanning…</span>
+        </div>
+
+        <!-- ROI Guide Box: shows user where to place their hand (#R2/#R5) -->
+        <div id="roi-guide" aria-hidden="true">
+          <div class="roi-corner roi-tl"></div>
+          <div class="roi-corner roi-tr"></div>
+          <div class="roi-corner roi-bl"></div>
+          <div class="roi-corner roi-br"></div>
+          <span class="roi-label">Place hand here</span>
+        </div>
+
+        <!-- Loading spinner (shown between camera start and first prediction) -->
+        <div id="cam-loading" role="status" aria-label="Connecting to prediction server">
+          <div class="spinner"></div>
+          <span style="font-size:0.82rem; color:var(--text-muted);">Connecting…</span>
+        </div>
+
+        <!-- Prediction Badge -->
+        <div id="pred-badge" role="status" aria-live="polite" aria-label="Current prediction">
+          <div>
+            <div class="pred-label">Letter</div>
+            <div id="current-letter">?</div>
+          </div>
+        </div>
+
+        <!-- Confidence Meter -->
+        <div id="confidence-meter" aria-hidden="true">
+          <div id="confidence-fill"></div>
+          <span id="confidence-pct">—</span>
+        </div>
+
+        <!-- Stability Indicator (fills as smoothing buffer grows) -->
+        <div id="stability-bar" aria-hidden="true">
+          <div class="stab-label">Stability</div>
+          <div class="stab-dots">
+            <div class="stab-dot" id="stab-dot-0"></div>
+            <div class="stab-dot" id="stab-dot-1"></div>
+            <div class="stab-dot" id="stab-dot-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Translated output -->
+      <div class="output-section">
+        <div class="output-header">
+          <span class="output-label">Translated Text</span>
+          <div class="output-actions">
+            <button id="btn-copy"  class="btn btn-ghost btn-icon" title="Copy text" aria-label="Copy translated text">📋</button>
+            <button id="btn-clear" class="btn btn-ghost btn-icon" title="Clear output" aria-label="Clear translated text">🗑</button>
+          </div>
+        </div>
+        <div id="output-box" data-text="" role="log" aria-live="polite" aria-label="Translated letters">
+          <span class="output-placeholder">Translated text appears here…</span>
+        </div>
+      </div>
+
+      <!-- Controls & Status -->
+      <div class="cam-controls">
+        <button id="btn-start" class="btn btn-primary" aria-label="Start camera and prediction">▶ Start Camera</button>
+        <button id="btn-stop"  class="btn btn-danger"  style="display:none" aria-label="Stop camera">⏹ Stop</button>
+        <div id="status-note" class="status-note" role="status" aria-live="polite">
+          Requires <code>python3 core/server.py</code> to be running.
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ── Story Section ──────────────────────────────── -->
+  <section id="story" aria-label="About SignToText">
+    <div class="container">
+      <span class="section-label">The Mission</span>
+      <h2 class="section-title">Bridging the Silence Gap</h2>
+      <p class="section-desc">
+        1 in 7 people worldwide experience some form of hearing loss. SignToText makes real-time sign language translation accessible to everyone — no expensive hardware needed.
+      </p>
+
+      <div class="story-grid stagger">
+        <div class="story-card glass-card reveal">
+          <div class="story-icon">🤝</div>
+          <h3>The Problem</h3>
+          <p>ASL users face communication barriers in daily life. Interpreters are scarce, expensive, and not always available in the moment communication is needed most.</p>
+        </div>
+        <div class="story-card glass-card reveal">
+          <div class="story-icon">✨</div>
+          <h3>Our Solution</h3>
+          <p>A browser-based tool that uses your existing webcam and a lightweight CNN model to translate hand signs to text — privately, instantly, and offline-capable.</p>
+        </div>
+        <div class="story-card glass-card reveal">
+          <div class="story-icon">🧠</div>
+          <h3>The Model</h3>
+          <p>Trained on 87,000 high-quality ASL images across 29 classes (A–Z + del, space, nothing) using a 3-layer CNN with BatchNorm, achieving strong validation accuracy.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Pipeline Section ───────────────────────────── -->
+  <section id="pipeline" aria-label="How it works pipeline">
+    <div class="container">
+      <span class="section-label">Under the Hood</span>
+      <h2 class="section-title">How It Works</h2>
+      <p class="section-desc">
+        Six steps from your hand to a letter on screen — all happening in under 1.5 seconds.
+      </p>
+
+      <div class="pipeline-wrap stagger" id="pipeline-wrap">
+        <div class="pipe-step reveal"
+             data-info="Your browser captures a 1080p video frame from your webcam every 1.5 seconds using the MediaDevices API. No video is stored or sent to any server.">
+          <div class="pipe-num">1</div>
+          <div class="pipe-label">Webcam Capture</div>
+        </div>
+        <div class="pipe-step reveal"
+             data-info="The frame is drawn onto an off-screen HTML Canvas and compressed into a base64-encoded JPEG string at 80% quality — reducing payload size significantly.">
+          <div class="pipe-num">2</div>
+          <div class="pipe-label">Frame Encode</div>
+        </div>
+        <div class="pipe-step reveal"
+             data-info="The base64 image is sent via HTTP POST to a local Flask server running at 127.0.0.1:5000. All processing stays on your machine — no cloud required.">
+          <div class="pipe-num">3</div>
+          <div class="pipe-label">HTTP POST</div>
+        </div>
+        <div class="pipe-step reveal"
+             data-info="The Flask server decodes the base64 string, converts it into a PIL image, resizes it to 64×64 pixels, and normalises pixel values to the [0, 1] range.">
+          <div class="pipe-num">4</div>
+          <div class="pipe-label">Preprocess</div>
+        </div>
+        <div class="pipe-step reveal"
+             data-info="The preprocessed image is fed through a 3-block CNN (Conv2D → BatchNorm → MaxPool) followed by GlobalAveragePooling and a Dense classifier — predicting 1 of 29 classes.">
+          <div class="pipe-num">5</div>
+          <div class="pipe-label">CNN Predict</div>
+        </div>
+        <div class="pipe-step reveal"
+             data-info="The predicted letter and confidence score are returned as JSON. If confidence exceeds 60%, the letter is displayed and appended to the running translation.">
+          <div class="pipe-num">6</div>
+          <div class="pipe-label">Display Letter</div>
+        </div>
+      </div>
+
+      <div id="pipe-info-box" aria-live="polite">Hover a step to learn more.</div>
+    </div>
+  </section>
+
+  <!-- ── Roadmap Section ────────────────────────────── -->
+  <section id="roadmap" aria-label="Project roadmap">
+    <div class="container">
+      <span class="section-label">What's Next</span>
+      <h2 class="section-title">The Road Ahead</h2>
+      <p class="section-desc">
+        SignToText is just getting started. Here's the roadmap for future versions.
+      </p>
+
+      <div class="roadmap-grid stagger">
+        <div class="roadmap-card glass-card reveal">
+          <div class="roadmap-phase">Phase 1 — Now</div>
+          <h3>Single-Letter Recognition</h3>
+          <p>A–Z + del, space, nothing. Live webcam. Flask backend. Browser UI.</p>
+        </div>
+        <div class="roadmap-card glass-card reveal">
+          <div class="roadmap-phase">Phase 2 — Next</div>
+          <h3>Word & Sentence Mode</h3>
+          <p>Smart buffering to detect word boundaries. Space gesture inserts spaces automatically.</p>
+        </div>
+        <div class="roadmap-card glass-card reveal">
+          <div class="roadmap-phase">Phase 3 — Future</div>
+          <h3>Multi-Language Output</h3>
+          <p>Translate the detected English text into any language using an integrated translation API.</p>
+        </div>
+        <div class="roadmap-card glass-card reveal">
+          <div class="roadmap-phase">Phase 4 — Vision</div>
+          <h3>Text-to-Speech</h3>
+          <p>Read the translated text aloud using the Web Speech API — enabling true two-way communication.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Contribute ASL Training Data Section ──────────── -->
+  <section id="train-section" aria-label="Contribute ASL training data">
+    <div class="container">
+      <span class="section-label">📸 Contribute Training Data</span>
+      <h2 class="section-title">Help the Model Learn Better ASL</h2>
+      <p class="section-desc">
+        Sign in and contribute your own ASL hand-sign captures. Your data is saved separately from the original dataset and used to fine-tune the model — improving accuracy for everyone.
+      </p>
+
+      <!-- ASL Standards Notice -->
+      <div class="asl-standards-card glass-card">
+        <div class="asl-standards-header">
+          <span class="asl-std-icon">📋</span>
+          <h3>Follow ASL Standards for Quality Contributions</h3>
+        </div>
+        <div class="asl-standards-grid">
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Plain, light or neutral background</div>
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Good, even lighting — no harsh shadows</div>
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Hand centred in the guide box</div>
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Hold the sign steady — no motion blur</div>
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Only one hand in frame</div>
+          <div class="asl-std-item"><span class="asl-std-check">✓</span> Match the ASL reference diagram shown</div>
+        </div>
+        <div class="asl-storage-note">
+          <span>🗂</span>
+          Your data is stored in <code>core/user_contributions/</code> — completely separate from <code>dataset/asl_alphabet_train/</code> — so it can always be distinguished from the original dataset.
+        </div>
+      </div>
+
+      <!-- Guard: shown when NOT logged in -->
+      <div id="train-guard" class="train-guard glass-card">
+        <div class="train-guard-icon">🔒</div>
+        <h3>Sign In to Contribute Training Data</h3>
+        <p>Your contributions are tagged with your name and timestamp so they can be tracked and verified.</p>
+        <button id="btn-train-signin" class="btn btn-primary">Sign In →</button>
+      </div>
+
+      <!-- Panel: shown when logged in -->
+      <div id="train-panel" class="train-panel" style="display:none">
+
+        <!-- Step 1: Select a letter -->
+        <div class="train-step glass-card">
+          <div class="train-step-header">
+            <div class="train-step-num">1</div>
+            <div>
+              <h3>Select an ASL Letter</h3>
+              <p class="train-step-desc">Pick the letter you want to contribute data for. The ASL reference diagram will appear automatically.</p>
+            </div>
+          </div>
+          <div class="letter-grid" id="letter-grid" role="group" aria-label="ASL letter selector"></div>
+        </div>
+
+        <!-- Step 2: Reference + Capture -->
+        <div class="train-step glass-card">
+          <div class="train-step-header">
+            <div class="train-step-num">2</div>
+            <div>
+              <h3>Match the Reference &amp; Capture</h3>
+              <p class="train-step-desc">Study the ASL diagram, then press <strong>Start Capture</strong>. A 3-2-1 countdown fires for each frame so your hand stays steady.</p>
+            </div>
+          </div>
+
+          <div class="train-camera-row">
+
+            <!-- Reference diagram panel -->
+            <div class="asl-ref-panel glass-card" id="asl-ref-panel">
+              <div class="asl-ref-placeholder" id="asl-ref-placeholder">
+                <span>👈</span>
+                <p>Select a letter to see the ASL reference</p>
+              </div>
+              <div id="asl-ref-content" style="display:none">
+                <div class="asl-ref-letter" id="asl-ref-letter"></div>
+                <div class="asl-ref-diagram" id="asl-ref-diagram"></div>
+                <p class="asl-ref-tip" id="asl-ref-tip"></p>
+              </div>
+            </div>
+
+            <!-- Training camera -->
+            <div class="train-camera-wrap" id="train-camera-wrap">
+              <div id="train-cam-idle">
+                <div class="cam-idle-icon">📷</div>
+                <p>Open camera to begin</p>
+              </div>
+              <video id="train-webcam" autoplay playsinline aria-label="Training webcam feed"></video>
+              <canvas id="train-snapshot" aria-hidden="true"></canvas>
+              <!-- ROI guide -->
+              <div id="train-roi-guide" aria-hidden="true">
+                <div class="roi-corner roi-tl"></div>
+                <div class="roi-corner roi-tr"></div>
+                <div class="roi-corner roi-bl"></div>
+                <div class="roi-corner roi-br"></div>
+                <span class="roi-label">Place hand here</span>
+              </div>
+              <!-- Flash effect on capture -->
+              <div id="train-flash"></div>
+            </div>
+
+            <!-- Sidebar controls -->
+            <div class="train-capture-info">
+              <div class="selected-letter-display">
+                <div class="sel-label">Selected</div>
+                <div id="train-selected-letter">—</div>
+              </div>
+
+              <div class="capture-count-wrap">
+                <div class="capture-count-label">Frames Captured</div>
+                <div id="capture-count">0 / 25</div>
+                <div class="capture-progress-wrap">
+                  <div class="capture-progress-bar" id="capture-progress-bar"></div>
+                </div>
+              </div>
+
+              <div class="train-cam-btns">
+                <button id="btn-train-open-cam" class="btn btn-ghost">📷 Open Camera</button>
+                <button id="btn-train-close-cam" class="btn btn-danger" style="display:none">⏹ Close</button>
+              </div>
+              <button id="btn-capture" class="btn btn-primary" style="display:none" disabled>📸 Capture Frame</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 3: Contribute & Train -->
+        <div class="train-step glass-card">
+          <div class="train-step-header">
+            <div class="train-step-num">3</div>
+            <div>
+              <h3>Contribute &amp; Fine-Tune</h3>
+              <p class="train-step-desc">
+                Your samples are saved to <code>core/user_contributions/</code> with your name and timestamp —
+                separate from <code>dataset/asl_alphabet_train/</code>.
+                The Dense head is then retrained on your data + original ASL samples (~30 s on CPU).
+              </p>
+            </div>
+          </div>
+
+          <div class="train-run-row">
+            <button id="btn-train-now" class="btn btn-primary btn-train-now" disabled>
+              🚀 Contribute &amp; Train
+            </button>
+            <button id="btn-train-reset" class="btn btn-ghost">↺ Reset</button>
+          </div>
+
+          <!-- Progress -->
+          <div id="train-progress-wrap" style="display:none">
+            <div class="train-progress-label" id="train-progress-label">Preparing…</div>
+            <div class="train-progress-track">
+              <div class="train-progress-fill" id="train-progress-fill"></div>
+            </div>
+          </div>
+
+          <!-- Result -->
+          <div id="train-result" style="display:none"></div>
+        </div>
+
+      </div><!-- /train-panel -->
+    </div>
+  </section>
+
+  <!-- ── Footer ─────────────────────────────────────── -->
+  <footer>
+    <div class="container">
+      <p>Built with ❤️ by <strong>Hemant</strong> · <a href="https://github.com" target="_blank" rel="noopener">GitHub</a></p>
+      <p style="margin-top:6px; font-size:0.75rem; opacity:0.5;">SignToText is open-source. Run the backend server locally for full functionality.</p>
+    </div>
+  </footer>
+
+  <!-- ── Auth Modal ──────────────────────────────────── -->
+  <div id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2 id="auth-modal-title">Welcome Back</h2>
+        <button id="btn-close-modal" aria-label="Close sign in modal">✕</button>
+      </div>
+
+      <div id="modal-error" class="modal-error" role="alert" aria-live="assertive"></div>
+
+      <div class="form-field">
+        <label for="auth-name">Display Name</label>
+        <input type="text" id="auth-name" placeholder="e.g. Hemant" autocomplete="name" maxlength="40" />
+      </div>
+
+      <div class="form-field">
+        <label for="auth-pass">Password <span style="color:var(--text-muted);font-weight:400">(local only)</span></label>
+        <input type="password" id="auth-pass" placeholder="Min 6 characters" autocomplete="current-password" />
+      </div>
+
+      <button id="btn-auth-submit" class="btn btn-primary">Sign In →</button>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
